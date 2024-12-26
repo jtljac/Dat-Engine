@@ -79,6 +79,8 @@ bool VulkanGPU::initialise() {
         return false;
     if (!initialiseFrameData())
         return false;
+    if (!initialiseGBuffers())
+        return false;
 
     CORE_INFO("Vulkan Renderer Initialised");
     return true;
@@ -99,21 +101,28 @@ void VulkanGPU::draw() {
 
     VK_QUICK_FAIL(commandBuffer.begin(vk::CommandBufferBeginInfo(vk::CommandBufferUsageFlagBits::eOneTimeSubmit)));
 
-    Shortcuts::transitionImage(commandBuffer, swapchainImage,
+    Shortcuts::transitionImage(commandBuffer, drawImage.image,
                                vk::ImageLayout::eUndefined, vk::ImageLayout::eGeneral,
                                vk::PipelineStageFlagBits2::eTopOfPipe,vk::PipelineStageFlagBits2::eTopOfPipe,
                                vk::AccessFlagBits2::eNone, vk::AccessFlagBits2::eMemoryWrite);
 
-    commandBuffer.clearColorImage(swapchainImage, vk::ImageLayout::eGeneral,
-                                  {0.f, 0.f, std::abs(DatMaths::sin(frameNumber / 120.f)), 0.f},
-                                  vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor,
-                                      0, vk::RemainingMipLevels,
-                                      0, vk::RemainingArrayLayers));
+    drawBackground(commandBuffer);
+
+    Shortcuts::transitionImage(commandBuffer, drawImage.image,
+                               vk::ImageLayout::eGeneral, vk::ImageLayout::eTransferSrcOptimal,
+                               vk::PipelineStageFlagBits2::eTopOfPipe,vk::PipelineStageFlagBits2::eComputeShader,
+                               vk::AccessFlagBits2::eMemoryWrite, vk::AccessFlagBits2::eMemoryRead);
+    Shortcuts::transitionImage(commandBuffer, swapchainImage,
+                               vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal,
+                               vk::PipelineStageFlagBits2::eTopOfPipe,vk::PipelineStageFlagBits2::eComputeShader,
+                               vk::AccessFlagBits2::eNone, vk::AccessFlagBits2::eMemoryWrite);
+
+    Shortcuts::copyImageToImage(commandBuffer, drawImage.image, swapchainImage, drawImageExtent, swapchainExtent);
 
     Shortcuts::transitionImage(commandBuffer, swapchainImage,
-                               vk::ImageLayout::eGeneral, vk::ImageLayout::ePresentSrcKHR,
-                               vk::PipelineStageFlagBits2::eTopOfPipe,vk::PipelineStageFlagBits2::eComputeShader,
-                               vk::AccessFlagBits2::eMemoryWrite, vk::AccessFlagBits2::eMemoryWrite);
+                               vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::ePresentSrcKHR,
+                               vk::PipelineStageFlagBits2::eComputeShader,vk::PipelineStageFlagBits2::eComputeShader,
+                               vk::AccessFlagBits2::eMemoryWrite, vk::AccessFlagBits2::eMemoryRead);
 
     VK_QUICK_FAIL(commandBuffer.end());
 
@@ -129,6 +138,16 @@ void VulkanGPU::draw() {
 
     ++frameNumber;
 }
+
+void VulkanGPU::drawBackground(vk::CommandBuffer cmd) {
+    cmd.clearColorImage(drawImage.image, vk::ImageLayout::eGeneral,
+                                  {0.f, 0.f, std::abs(DatMaths::sin(frameNumber / 120.f)), 0.f},
+                                  vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor,
+                                      0, vk::RemainingMipLevels,
+                                      0, vk::RemainingArrayLayers));
+}
+
+
 
 bool VulkanGPU::initialiseInstance() {
     CORE_TRACE("Creating VK Instance");
@@ -253,17 +272,6 @@ bool VulkanGPU::initialiseDevice() {
     return true;
 }
 
-bool VulkanGPU::initialiseSurface() {
-    VkSurfaceKHR surface;
-    if (!SDL_Vulkan_CreateSurface(Engine::getInstance()->getWindow(), instance, &surface)) {
-        CORE_CRITICAL("Failed to create surface with SDL.");
-        return false;
-    };
-
-    this->surface = surface;
-    return true;
-}
-
 bool VulkanGPU::initialiseVma() {
     CORE_TRACE("Initialising VMA");
     // const vma::AllocatorCreateInfo allocatorCreateInfo = vma::AllocatorCreateInfo({}, physicalDevice, device)
@@ -284,18 +292,17 @@ bool VulkanGPU::initialiseVma() {
 
     return true;
 }
-vk::Extent2D VulkanGPU::getWindowExtent(const vk::SurfaceCapabilitiesKHR& surfaceCapabilities) {
-    if (surfaceCapabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
-        return surfaceCapabilities.currentExtent;
-    }
 
-    int width, height;
-    SDL_GetWindowSize(Engine::getInstance()->getWindow(), &width, &height);
-
-    return {
-        DatMaths::clamp<uint32_t>(width, surfaceCapabilities.minImageExtent.width, surfaceCapabilities.maxImageExtent.width),
-        DatMaths::clamp<uint32_t>(height, surfaceCapabilities.minImageExtent.height, surfaceCapabilities.maxImageExtent.height)
+bool VulkanGPU::initialiseSurface() {
+    CORE_TRACE("Creating Surface");
+    VkSurfaceKHR surface;
+    if (!SDL_Vulkan_CreateSurface(Engine::getInstance()->getWindow(), instance, &surface)) {
+        CORE_CRITICAL("Failed to create surface with SDL.");
+        return false;
     };
+
+    this->surface = surface;
+    return true;
 }
 
 bool VulkanGPU::initialiseSwapchain() {
@@ -387,11 +394,46 @@ bool VulkanGPU::initialiseFrameSyncStructure(FrameData& frameData) const {
     return true;
 }
 
+bool VulkanGPU::initialiseGBuffers() {
+    CORE_TRACE("Initialising G-Buffers");
+    drawImageExtent = swapchainExtent;
+
+    drawImage.format = vk::Format::eR16G16B16A16Sfloat;
+    drawImage.extent = vk::Extent3D{drawImageExtent.width, drawImageExtent.height, 1};
+
+    const VkImageCreateInfo drawImageCreateInfo = Shortcuts::getImageCreateInfo(
+            drawImage.format,
+            vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst
+                    | vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eColorAttachment,
+            drawImage.extent
+    );
+
+    const VmaAllocationCreateInfo vmaAllocationCreateInfo {
+        {},
+        VMA_MEMORY_USAGE_GPU_ONLY,
+        (VkMemoryPropertyFlags) vk::MemoryPropertyFlags(vk::MemoryPropertyFlagBits::eDeviceLocal)
+    };
+
+    VkImage image{};
+
+    vmaCreateImage(allocator, &drawImageCreateInfo, &vmaAllocationCreateInfo, &image, &drawImage.allocation, nullptr);
+    drawImage.image = image;
+
+    VK_CHECK(drawImage.view, device.createImageView(Shortcuts::getImageViewCreateInfo(
+        drawImage.format,
+        drawImage.image,
+        vk::ImageAspectFlagBits::eColor
+    )));
+
+    return true;
+}
+
 /* -------------------------------------------- */
 /* Cleanup                                      */
 /* -------------------------------------------- */
 
 void VulkanGPU::destroyDebugMessenger() {
+    CORE_TRACE("Destroying Debug Messenger");
     // Cheeky load to make sure the function is loaded
     const auto func = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
             instance.getProcAddr("vkDestroyDebugUtilsMessengerEXT"));
@@ -403,6 +445,7 @@ void VulkanGPU::destroyDebugMessenger() {
 }
 
 void VulkanGPU::destroySwapchain() {
+    CORE_TRACE("Destroying the Swapchain");
     device.destroySwapchainKHR(swapchain);
 
     for (int i = 0; i < swapchainImageCount; i++) {
@@ -423,6 +466,8 @@ void VulkanGPU::destroySwapchain() {
     swapchainData = nullptr;
     swapchainImageCount = 0;
 }
+
+void VulkanGPU::destroyGpuMemory() {}
 
 /* -------------------------------------------- */
 /* Utils                                        */
@@ -535,6 +580,21 @@ vk::SurfaceFormatKHR VulkanGPU::getBestSwapchainFormat() const {
 
     return surfaceFormats[0];
 }
+
+vk::Extent2D VulkanGPU::getWindowExtent(const vk::SurfaceCapabilitiesKHR& surfaceCapabilities) {
+    if (surfaceCapabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
+        return surfaceCapabilities.currentExtent;
+    }
+
+    int width, height;
+    SDL_GetWindowSize(Engine::getInstance()->getWindow(), &width, &height);
+
+    return {
+        DatMaths::clamp<uint32_t>(width, surfaceCapabilities.minImageExtent.width, surfaceCapabilities.maxImageExtent.width),
+        DatMaths::clamp<uint32_t>(height, surfaceCapabilities.minImageExtent.height, surfaceCapabilities.maxImageExtent.height)
+    };
+}
+
 vk::PresentModeKHR VulkanGPU::getIdealPresentMode() const {
     const bool enableVsync = CVarSystem::get()->getBoolCVar("BEnableVsync");
     const auto availablePresentModes = physicalDevice.getSurfacePresentModesKHR(surface).value;
@@ -549,12 +609,12 @@ vk::PresentModeKHR VulkanGPU::getIdealPresentMode() const {
 }
 
 FrameData& VulkanGPU::getCurrentFrame() const {
-
     return frameData[frameNumber % bufferedFrames];
 }
 
 void VulkanGPU::addValidationLayer(const char* layer) {
 #ifdef _DEBUG
+    CORE_TRACE("Adding validation layer: {}", layer);
     validationLayers.push_back(layer);
 #endif
 }
@@ -568,6 +628,13 @@ int VulkanGPU::getWindowFlags() {
 }
 
 void VulkanGPU::cleanup() {
+    CORE_TRACE("Cleaning up the Vulkan Renderer");
+
+    destroyGpuMemory();
+
+    device.destroyImageView(drawImage.view);
+    vmaDestroyImage(allocator, drawImage.image, drawImage.allocation);
+
     destroySwapchain();
 
     instance.destroySurfaceKHR(surface);

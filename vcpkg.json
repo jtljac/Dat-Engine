@@ -12,6 +12,9 @@
     "name" : "catch2",
     "version>=" : "3.6.0"
   }, {
+    "name" : "cargs",
+    "version>=" : "1.2.0#0"
+  }, {
     "name" : "llfio",
     "version>=" : "2023-11-06"
   }, {
@@ -20,8 +23,15 @@
   }, {
     "name" : "sdl2",
     "version>=" : "2.30.7",
-    "features": [
-      "vulkan"
-    ]
+    "features" : [ "vulkan" ]
+  }, {
+    "name" : "bxzstr",
+    "version>=" : "1.2.2"
+  }, {
+    "name" : "shaderc",
+    "version>=" : "2023.8"
+  }, {
+    "name" : "assimp",
+    "version>=" : "5.4.3"
   } ]
 }
