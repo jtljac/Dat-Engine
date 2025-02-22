@@ -1,7 +1,5 @@
 #pragma once
 
-#include <shaderc/shaderc.hpp>
-
 #include "base-asset-processor.h"
 
 namespace AssetProcessor::Processors {
